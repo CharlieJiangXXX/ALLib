@@ -1,5 +1,5 @@
 #!/usr/bin/python
-from ATAcquirer import *
+from ATAcquisition.ATAcquirer import *
 
 
 # @class ATDisagreement
@@ -11,7 +11,7 @@ class ATDisagreement(ATAcquirer):
 
         with torch.no_grad():
             # take k monte-carlo samples of forward pass without dropout
-            y = torch.stack([self._model(datapoints) for i in range(k)], dim=1)
+            y = torch.stack([self._model(datapoints.to(self._device)) for i in range(k)], dim=1)
             entropy_1 = element_entropy(y.mean(axis=1)).sum(dim=1)
             entropy_2 = element_entropy(y).sum(dim=(1, 2)) / k
 

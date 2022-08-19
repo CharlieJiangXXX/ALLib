@@ -2,13 +2,11 @@
 import cv2
 import numpy as np
 from openslide import open_slide
-from openslide.deepzoom import DeepZoomGenerator
-
-MAX_FEATURES = 500
-GOOD_MATCH_PERCENT = 0.15
 
 
 def image_align(im1, im2):
+    MAX_FEATURES = 500
+    GOOD_MATCH_PERCENT = 0.15
     # Convert images to grayscale
     im1 = cv2.cvtColor(im1, cv2.COLOR_BGR2GRAY)
     im2 = cv2.cvtColor(im2, cv2.COLOR_BGR2GRAY)
@@ -54,9 +52,25 @@ def print_slide_props(slide: open_slide):
     print(slide.properties)
 
 
-lm1 = open_slide("../Assets/LM1.ndpi")
-lm2 = open_slide("../Assets/LM2.ndpi")
+def downscale(t: tuple) -> tuple:
+    scale = 100000000 / (t[0] * t[1])
+    if scale < 1:
+        return (t[0] * scale), (t[1] * scale)
+    return t
 
-print_slide_props(lm1)
 
-tiles = DeepZoomGenerator(lm1, tile_size=256, overlap=0, limit_bounds=False)
+def process_lms():
+    lm1 = open_slide("../Assets/LM1.ndpi")
+    lm2 = open_slide("../Assets/LM2.ndpi")
+    print(downscale(lm1.level_dimensions[0]))
+    thumb1 = lm1.get_thumbnail(downscale(lm1.level_dimensions[0]))
+    thumb2 = lm2.get_thumbnail(downscale(lm2.level_dimensions[0]))
+    thumb1.save('/tmp/img1.png', "PNG")
+    thumb2.save('/tmp/img2.png', "PNG")
+
+
+# print_slide_props(lm1)
+
+# tiles = DeepZoomGenerator(lm1, tile_size=256, overlap=0, limit_bounds=False)
+
+process_lms()

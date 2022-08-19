@@ -48,27 +48,14 @@ def nan_in_tensor(x):
     return torch.isnan(x).any()
 
 
-def remove_occurrences_from_list(lst, items):
-    return list(np.setdiff1d(np.array(lst, dtype=int),
-                             np.array(items, dtype=int), assume_unique=True))
-
-
-def move_data(indices, from_subset, to_subset):
-    from_subset.indices = remove_occurrences_from_list(from_subset.indices, indices)
-    if isinstance(to_subset.indices, list):
-        to_subset.indices.extend(indices)
-    elif isinstance(to_subset.indices, np.ndarray):
-        to_subset.indices = np.concatenate([to_subset.indices, np.array(indices)])
-
-
 # @class ATAcquirer
 # @abstract Base class for all acquisition functions.
 
 class ATAcquirer:
-    def __init__(self, batch_size, device, model):
+    def __init__(self, batch_size, model):
         self._batchSize = batch_size
         self._subBatchSize = 128
-        self._device = device
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._model = model
 
     # @function score
@@ -82,12 +69,12 @@ class ATAcquirer:
     def score(self, datapoints: torch.Tensor) -> np.array:
         return torch.zeros(len(datapoints))
 
-    # @function batch_score
+    # @function select_batch
     # @abstract Score every datapoint in the pool under the model.
     # @param pool_data The data pool whose datapoints the function analyze.
     # @result          The best local indices.
 
-    def batch_score(self, pool_data) -> np.array:
+    def select_batch(self, pool_data) -> np.array:
         pool_loader = DataLoader(pool_data, batch_size=self._subBatchSize,
                                  pin_memory=True, shuffle=False)
         scores = torch.zeros(len(pool_data)).to(self._device)
