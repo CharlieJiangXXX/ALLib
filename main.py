@@ -17,4 +17,4 @@ if __name__ == '__main__':
 
     train_test = ATTrainTest(model, criterion, optimizer, scheduler, acquirer, num_features, train_set, test_set,
                              None, 128)
-    train_test.train_test()
+    train_test.train_test(100)

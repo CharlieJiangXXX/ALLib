@@ -33,8 +33,8 @@ class ATTrainTest:
                  scheduler: optim.lr_scheduler, acquirer: ATBatchDisagreement, num_features: int,
                  train_data: torchvision.datasets, test_data: torchvision.datasets = None,
                  val_data: torchvision.datasets = None, batch_size: int = 128,
-                 acc_path: str = 'at_acc_loss.txt', weight_path: str = 'at_weights.pth',
-                 optim_path: str = 'at_optim.pth') -> None:
+                 acc_path: str = 'Assets/at_acc_loss.txt', weight_path: str = 'Assets/at_weights.pth',
+                 optim_path: str = 'Assets/at_optim.pth') -> None:
 
         self._weightPath = weight_path
         self._optimPath = optim_path
@@ -84,7 +84,8 @@ class ATTrainTest:
 
     def _save_model(self) -> None:
         with open(self._accPath, 'w') as f:
-            f.write("Best accuracy: {:.4f}\n".format(self._bestAcc))
+            f.write("Best accuracy: {:.4f}".format(self._bestAcc))
+            f.write("\n")
             f.write("Minimum loss: {:.4f}".format(self._minLoss))
         torch.save(self._model.state_dict(), self._weightPath)
         torch.save(self._optimizer.state_dict(), self._optimPath)
@@ -205,7 +206,6 @@ class ATTrainTest:
     def _train_test(self, mode: int, num_epochs: int = 10, num_images: int = 0,
                     prob: bool = False, cfm: bool = False, loss: bool = True) -> (list, list):
         start_time = time.time()
-        self._bestAcc = 0.0
         temp_loss = 0.0
         temp_corrects = 0
         epoch_loss = []
@@ -222,7 +222,7 @@ class ATTrainTest:
                 mode_str = "Testing"
 
         for epoch in range(1, num_epochs + 1):
-            print('Epoch {}/{}'.format(epoch, num_epochs))
+            print('[*] Epoch {}/{}'.format(epoch, num_epochs))
             if mode == 0 or mode == 2:
                 temp_loss, temp_corrects = self._train_test_once()
             if mode == 1 or mode == 2:
@@ -230,16 +230,16 @@ class ATTrainTest:
 
             epoch_loss.append(temp_loss / dataset_size)
             epoch_acc.append(temp_corrects / dataset_size)
-            print('Loss: {:.4f} Acc: {:.4f}'.format(epoch_loss[-1], epoch_acc[-1]))
+            print('[*] Loss: {:.4f} Acc: {:.4f}'.format(epoch_loss[-1], epoch_acc[-1]))
             if cfm:
                 self._plot_cfm()
 
             # Make a copy of the model if the accuracy on the validation set has improved
             if epoch_acc[-1] > self._bestAcc and epoch_loss[-1] <= self._minLoss:
-                print("OK")
                 self._bestAcc = epoch_acc[-1]
                 self._minLoss = epoch_loss[-1]
                 self._save_model()  # Now we'll load in the best model weights
+                print("[+] Model updated.")
 
             print()
 
@@ -248,7 +248,6 @@ class ATTrainTest:
             plt.plot(epoch_acc)
         run_time = time.time() - start_time
         print('[+] {} completed in {:.0f}m {:.0f}s'.format(mode_str, run_time // 60, run_time % 60))
-        self.get_best_acc()
         return epoch_loss, epoch_acc
 
     def train(self, num_epochs: int = 10) -> None:
