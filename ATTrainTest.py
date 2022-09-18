@@ -5,9 +5,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sn
 import torch.backends.cudnn as cudnn
-import torch.nn as nn
-import torch.optim as optim
-import torchvision
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import *
+from torch.optim.swa_utils import *
+from torchvision import transforms
 
 from ATAcquisition.ATBatchDisagreement import *
 
@@ -24,97 +25,122 @@ def imshow(inp, title: str = None) -> None:
     plt.pause(0.001)  # pause a bit so that plots are updated
 
 
+CHECKPOINT_PATH = './checkpoint/ckpt.pth'
+
+
 # @class ATTrainTest
 # @abstract
 # @discussion
 
 class ATTrainTest:
-    def __init__(self, model: torchvision.models, criterion: nn.modules.loss, optimizer: optim.Optimizer,
-                 scheduler: optim.lr_scheduler, acquirer: ATBatchDisagreement, num_features: int,
-                 train_data: torchvision.datasets, test_data: torchvision.datasets = None,
-                 val_data: torchvision.datasets = None, batch_size: int = 128,
-                 acc_path: str = 'Assets/at_acc_loss.txt', weight_path: str = 'Assets/at_weights.pth',
-                 optim_path: str = 'Assets/at_optim.pth') -> None:
+    def __init__(self, model: nn.Module, criterion: nn.modules.loss,
+                 optimizer: Optimizer, acquirer: ATBatchDisagreement,
+                 norm: transforms.Normalize, train_data: Dataset, test_data: Dataset = None,
+                 batch_size: int = 512, resume: bool = True) -> None:
 
-        self._weightPath = weight_path
-        self._optimPath = optim_path
+        # Dataloader initialization
+        self._batchSize = 128
+        if batch_size > 0:
+            self._batchSize = batch_size
+
+        if not train_data:
+            raise AssertionError
+
+        self._norm = norm
+        self.set_train_data(train_data)
+        if test_data:
+            self.set_test_data(test_data)
 
         # Device & model initialization
         self._model = model
-        self._model.fc = nn.Linear(model.fc.in_features, num_features)  # Number of features in fully connected layer
+        self._model.fc = nn.Linear(model.fc.in_features, self._numFeatures)
         self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._model = self._model.to(self._device)
-        if self._device == torch.device('cuda'):
-            self._model = torch.nn.DataParallel(self._model)
+        if torch.cuda.is_available():
+            self._model = nn.DataParallel(self._model)
             cudnn.benchmark = True
 
         # Criterion, optimizer, scheduler
         self._criterion = criterion
         self._optimizer = optimizer
-        self._scheduler = scheduler
+        self._scheduler = CosineAnnealingLR(self._optimizer, T_max=200)
+        self._swaModel = None
+        self._swaScheduler = SWALR(self._optimizer, anneal_strategy="cos", anneal_epochs=20, swa_lr=0.05)
         self._acquirer = acquirer
-
-        # Dataloader initialization
-        if batch_size > 0:
-            self._batchSize = batch_size
-        else:
-            self._batchSize = 128
-
-        if not train_data:
-            raise AssertionError
-        self._origTrainData = train_data
-        self.set_train_data(train_data)
-        if test_data:
-            self.set_test_data(test_data)
-        if val_data:
-            self.set_val_data(val_data)
 
         # Store the best accuracy & load the imported model if it exists
         self._bestAcc = 0.0
         self._minLoss = 100.0
-        self._accPath = acc_path
-        if os.path.isfile(acc_path) and os.path.isfile(weight_path) and os.path.isfile(optim_path):
-            self._load_model()
 
-        self._confusionMatrix = torch.zeros(num_features, num_features)
+        if resume:
+            if not os.path.isdir('checkpoint'):
+                os.mkdir('checkpoint')
+            if os.path.isfile(CHECKPOINT_PATH):
+                self._load_model()
+
+        self._printProb = False
+        self._graphCFM = False
+        self._graphLoss = False
+        self._confusionMatrix = torch.zeros(self._numFeatures, self._numFeatures)
 
     def __del__(self) -> None:
         self.get_best_acc()
         self.get_min_loss()
 
     def _save_model(self) -> None:
-        with open(self._accPath, 'w') as f:
-            f.write("Best accuracy: {:.4f}".format(self._bestAcc))
-            f.write("\n")
-            f.write("Minimum loss: {:.4f}".format(self._minLoss))
-        torch.save(self._model.state_dict(), self._weightPath)
-        torch.save(self._optimizer.state_dict(), self._optimPath)
+        state = {
+            'weights': self._model.state_dict(),
+            'optim': self._optimizer.state_dict(),
+            'acc': self._bestAcc,
+            'loss': self._minLoss,
+        }
+        torch.save(state, CHECKPOINT_PATH)
 
     def _load_model(self) -> None:
-        try:
-            with open(self._accPath, 'r') as f:
-                acc = f.readline()
-                self._bestAcc = float(acc.replace("Best accuracy: ", "").strip())
-                loss = f.readline()
-                self._minLoss = float(loss.replace("Minimum loss: ", "").strip())
-        except ValueError:
-            pass
+        checkpoint = torch.load(CHECKPOINT_PATH)
+        self._model.load_state_dict(checkpoint['weights'])
+        self._optimizer.load_state_dict(checkpoint['optim'])
+        self._bestAcc = checkpoint['acc']
+        self._minLoss = checkpoint['loss']
 
-        self._model.load_state_dict(torch.load(self._weightPath))
-        self._optimizer.load_state_dict(torch.load(self._optimPath))
+    def set_train_data(self, train: Dataset) -> None:
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            self._norm,
+        ])
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),
+            self._norm,
+        ])
 
-    def set_train_data(self, dataset: torchvision.datasets) -> None:
-        self._trainData = dataset
-        self._trainLoader = DataLoader(dataset, batch_size=self._batchSize, shuffle=True)
+        train, val = random_split(train, (int(0.9 * len(train)), int(0.1 * len(train))))
+        train.dataset.transform = train_transform
+        val.dataset.transform = val_transform
 
-    def set_test_data(self, dataset: torchvision.datasets) -> None:
-        self._testData = dataset
-        self._classNames = dataset.classes
-        self._testLoader = DataLoader(dataset, batch_size=self._batchSize, shuffle=True)
+        self._trainLoader = DataLoader(train, batch_size=self._batchSize,
+                                       pin_memory=torch.cuda.is_available(), num_workers=2)
+        self._valLoader = DataLoader(val, batch_size=self._batchSize,
+                                     pin_memory=torch.cuda.is_available(), num_workers=2)
 
-    def set_val_data(self, dataset: torchvision.datasets) -> None:
-        self._valData = dataset
-        self._valLoader = DataLoader(dataset, batch_size=self._batchSize, shuffle=True)
+    def set_test_data(self, test: Dataset) -> None:
+        self._classNames = test.classes
+        self._numFeatures = len(test.classes)
+
+        test = Subset(test, indices=torch.arange(len(test)))
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            self._norm,
+        ])
+        test.dataset.transform = transform
+        self._testLoader = DataLoader(test, batch_size=self._batchSize,
+                                      pin_memory=torch.cuda.is_available(), shuffle=False, num_workers=2)
+
+    def set_visual_options(self, prob: bool = False, cfm: bool = False, loss: bool = True):
+        self._printProb = prob
+        self._graphCFM = cfm
+        self._graphLoss = loss
 
     def get_best_acc(self) -> float:
         print("[+] Model best accuracy: {:.4f}".format(self._bestAcc))
@@ -134,6 +160,7 @@ class ATTrainTest:
         heatmap.xaxis.set_ticklabels(heatmap.xaxis.get_ticklabels(), rotation=45, ha='right', fontsize=15)
         plt.ylabel('True label')
         plt.xlabel('Predicted label')
+        plt.show()
 
         # ROC-AUC
         # tn, fp, fn, tp = self.cfm.ravel()
@@ -152,109 +179,113 @@ class ATTrainTest:
         # plt.xlabel('FPR', fontsize=16)
         # plt.legend(fontsize=12);
 
-    def _train_test_once(self, train: bool = True, prob: bool = False, cfm: bool = False, img: int = 0) -> (float, int):
+    def _train_test_once(self, num_images: int = 0, mode: int = 0) -> (float, int):
         # First set to eval mode
-        self._model.train() if train else self._model.eval()
+        if mode == 0:
+            print("train")
+            self._model.train()
+            loader = self._trainLoader
+        else:
+            print("eval")
+            self._model.eval()
+            loader = self._valLoader if mode == 1 else self._testLoader
+        assert loader, "[!] Dataloader is not allocated."
 
-        orig_img = img
-        temp_loss = 0.0
-        temp_corrects = 0
+        num_images_left = num_images
+        loss_sum = 0.0
+        loss = 0.0
+        correct_count = 0
+        total = 0
 
-        if train and not self._trainLoader:
-            print("[!] self._trainLoader not allocated. Please first invoke set_train_data().")
-            return -1.0, -1
-        elif not train and not self._testLoader:
-            print("[!] self._testLoader not allocated. Please first invoke set_test_data().")
-            return -1.0, -1
+        with torch.set_grad_enabled(mode == 0):
+            for index, (inputs, labels) in enumerate(loader):
+                # Parse inputs and labels
+                inputs = inputs.to(self._device)
+                labels = labels.to(self._device)
 
-        for inputs, labels in (self._trainLoader if train else self._testLoader):
-            inputs = inputs.to(self._device)
-            labels = labels.to(self._device)
-            self._optimizer.zero_grad()
+                # Zero gradients only in train mode
+                (mode == 0) and self._optimizer.zero_grad(set_to_none=True)
 
-            # Enable gradient for training
-            with torch.set_grad_enabled(train):
-                outputs = self._model(inputs)
+                # Calculate outputs and loss
+                outputs = self._model(inputs) if ((mode == 0) or not self._swaModel) else self._swaModel(inputs)
                 loss = self._criterion(outputs, labels)
-                predicted = outputs.argmax(dim=1, keepdim=True)
-                if train:
+
+                # Backward propagation & stepping optimizer
+                if mode == 0:
                     loss.backward()
                     self._optimizer.step()
 
-            for i in range(inputs.size()[0]):
-                if img == 0:
-                    break
-                img -= 1
-                ax = plt.subplot(orig_img // 2, 2, img)
-                ax.axis('off')
-                ax.set_title(f'predicted: {self._classNames[predicted[i]]}')
-                imshow(inputs.cpu().data[i])
+                # Stats calculation
+                loss_sum += loss.item() * inputs.size(0)
+                predicted = outputs.argmax(dim=1, keepdim=True)
+                total += labels.size(0)
+                correct_count += predicted.eq(labels.view_as(predicted)).sum().item()
+                loss = loss_sum / (index + 1)
+                print("Loss: %.3f | Acc: %.3f%% (%d/%d)" % (loss, 100. * correct_count / total, correct_count, total))
 
-            temp_loss += loss.item() * inputs.size(0)
-            temp_corrects += predicted.eq(labels.view_as(predicted)).sum().item()
-            if prob:
-                m = nn.Softmax(dim=1)
-                print(m(outputs))
-            if cfm:
-                for t, p in zip(labels.view(-1), predicted.view(-1)):
-                    self._confusionMatrix[t.long(), p.long()] += 1
+                # Visualization
+                for i in range(inputs.size()[0]):
+                    if num_images_left == 0:
+                        break
+                    if num_images > 1:
+                        ax = plt.subplot(num_images // 2, 2, num_images_left)
+                    else:
+                        ax = plt.subplot(1, 1, 1)
+                    ax.axis('off')
+                    ax.set_title(f'Predicted: {self._classNames[predicted[i]]}')
+                    imshow(inputs.cpu().data[i])
+                    num_images_left -= 1
+                if self._printProb:
+                    m = nn.Softmax(dim=1)
+                    print(m(outputs))
+                if self._graphCFM:
+                    for t, p in zip(labels.view(-1), predicted.view(-1)):
+                        self._confusionMatrix[t.long(), p.long()] += 1
 
-        if train:
-            self._scheduler.step()
-        return temp_loss, temp_corrects
+        return loss, correct_count / total
 
-    def _train_test(self, mode: int, num_epochs: int = 10, num_images: int = 0,
-                    prob: bool = False, cfm: bool = False, loss: bool = True) -> (list, list):
+    def train(self, num_epochs: int = 10, num_images: int = 0) -> (list, list):
         start_time = time.time()
-        temp_loss = 0.0
-        temp_corrects = 0
         epoch_loss = []
         epoch_acc = []
-        mode_str = "Training & Testing"
 
-        if mode == 0:
-            dataset_size = len(self._trainLoader) * self._trainLoader.batch_size
-            mode_str = "Training"
-            self.set_train_data(self._acquirer.select_batch((self._origTrainData, self._testData)))
-        else:
-            dataset_size = len(self._testLoader) * self._testLoader.batch_size
-            if mode == 1:
-                mode_str = "Testing"
+        # self.set_train_data(self._acquirer.select_batch(self._testLoader.dataset))
 
         for epoch in range(1, num_epochs + 1):
             print('[*] Epoch {}/{}'.format(epoch, num_epochs))
-            if mode == 0 or mode == 2:
-                temp_loss, temp_corrects = self._train_test_once()
-            if mode == 1 or mode == 2:
-                temp_loss, temp_corrects = self._train_test_once(False, prob, cfm, num_images)
+            swa = (epoch > (num_epochs // 2))
+            self._train_test_once(num_images)
+            if swa:
+                if not self._swaModel:
+                    self._swaModel = AveragedModel(self._model)
+                self._swaModel.update_parameters(self._model)
+            loss, acc = self._train_test_once(num_images, 1)
 
-            epoch_loss.append(temp_loss / dataset_size)
-            epoch_acc.append(temp_corrects / dataset_size)
+            self._swaScheduler.step() if swa else self._scheduler.step()
+
+            epoch_loss.append(loss)
+            epoch_acc.append(acc * 100)
             print('[*] Loss: {:.4f} Acc: {:.4f}'.format(epoch_loss[-1], epoch_acc[-1]))
-            if cfm:
+            if self._graphCFM:
                 self._plot_cfm()
 
             # Make a copy of the model if the accuracy on the validation set has improved
-            if epoch_acc[-1] > self._bestAcc and epoch_loss[-1] <= self._minLoss:
+            if epoch_acc[-1] > self._bestAcc:
                 self._bestAcc = epoch_acc[-1]
                 self._minLoss = epoch_loss[-1]
                 self._save_model()  # Now we'll load in the best model weights
                 print("[+] Model updated.")
-
             print()
 
-        if loss:
+        update_bn(self._trainLoader, self._swaModel)
+        if self._graphLoss:
             plt.plot(epoch_loss)
             plt.plot(epoch_acc)
+            plt.show()
+
         run_time = time.time() - start_time
-        print('[+] {} completed in {:.0f}m {:.0f}s'.format(mode_str, run_time // 60, run_time % 60))
+        print('[+] Training completed in {:.0f}m {:.0f}s'.format(run_time // 60, run_time % 60))
         return epoch_loss, epoch_acc
 
-    def train(self, num_epochs: int = 10) -> None:
-        self._train_test(0, num_epochs)
-
-    def test(self, num_epochs: int = 10, prob: bool = False, cfm: bool = False, loss: bool = True) -> None:
-        self._train_test(1, num_epochs, prob, cfm, loss)
-
-    def train_test(self, num_epochs: int = 10, prob: bool = False, cfm: bool = False, loss: bool = True) -> None:
-        self._train_test(2, num_epochs, prob, cfm, loss)
+    def test(self, num_images: int = 0) -> None:
+        self._train_test_once(num_images, 2)

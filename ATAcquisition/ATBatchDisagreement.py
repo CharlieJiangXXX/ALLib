@@ -1,41 +1,45 @@
-from torch.utils import data
+import torch.nn as nn
+from torch.utils.data import random_split, Dataset
 
 from ATAcquisition.ATDisagreement import *
 
 
 class ATBatchDisagreement(ATDisagreement):
-    def __init__(self, batch_size, model):
+    def __init__(self, batch_size: int, model: nn.Module):
         super().__init__(batch_size, model)
         self._numMCSamples = 10000  # Number of MC samples for label combinations
         self._numSubPoolDataPoints = 500  # number of datapoints in the sub-pool from which we acquire
 
-    def select_batch(self, pool_data, k: int = 100) -> np.array:
-        num_class = 10  # number of classes
+    def select_batch(self, pool_data: Dataset, num_features: int = 10, k: int = 100) -> np.array:
         num_extra = len(pool_data) - self._numSubPoolDataPoints
 
         # performing BatchBALD on the whole pool is very expensive, so we take
-        # a random subset of the pool.
-        if num_extra > 0:
-            sub_pool_data, _ = torch.utils.data.random_split(pool_data, [self._numSubPoolDataPoints, num_extra])
-        # even if we don't have enough data left to split, we still need to
-        # call random_splot to avoid messing up the indexing later on
-        else:
-            sub_pool_data, _ = torch.utils.data.random_split(pool_data, [len(pool_data), 0])
+        # a random subset of the pool. Even if we don't have enough data left to
+        # split, we still need to call random_split to avoid messing up the indexing
+        # later on.
+        sub_pool_data, _ = random_split(pool_data, [self._numSubPoolDataPoints, num_extra] if num_extra > 0
+        else [len(pool_data), 0])
 
         # Forward pass on the pool once to get class probabilities for each x
         with torch.no_grad():
-            pool_loader = torch.utils.data.DataLoader(sub_pool_data, batch_size=self._subBatchSize, pin_memory=True,
-                                                      shuffle=False)
-            pool_p_y = torch.zeros(len(sub_pool_data), num_class, k)
-            for index, sample in enumerate(pool_loader):
-                pool_p_y[index:+ sample.shape[0]] = torch.stack([self._model(sample.to(self._device))
-                                                                 for _ in range(k)], dim=1).permute(0, 2, 1)
+            pool_loader = DataLoader(sub_pool_data, batch_size=self._subBatchSize, pin_memory=True,
+                                     shuffle=False)
+            pool_p_y = torch.zeros(len(sub_pool_data), num_features, k)
+            for index, (sample, _) in enumerate(pool_loader):
+                sample = sample.to(self._device)
+                print(sample.shape)
+                print(index)
+                print(sample.shape[0])
+                print(pool_p_y[index:+ sample.shape[0]].shape)
+                print(torch.cat([self._model(sample) for _ in range(k)], dim=1).permute(0, 1).shape)
+                pool_p_y[index:+ sample.shape[0]] = torch.cat([self._model(sample)
+                                                               for _ in range(k)], dim=1).permute(0, 1)
 
         # this only need to be calculated once so we pull it out of the loop
         entropy2 = (element_entropy(pool_p_y).sum(dim=(1, 2)) / k).to(self._device)
 
         # get all class combinations
-        c_1_to_n = class_combinations(num_class, self._batchSize, self._numMCSamples)
+        c_1_to_n = class_combinations(num_features, self._batchSize, self._numMCSamples)
 
         # tensor of size [m x k]
         p_y_1_to_n_minus_1 = None
@@ -68,5 +72,7 @@ class ATBatchDisagreement(ATDisagreement):
         # we've subset-ed our dataset twice, so we need to go back through
         # subset indices twice to recover the global indices of the chosen data
         best_local_indices = np.array(sub_pool_data.indices)[best_sub_local_indices]
+        print(best_local_indices.shape)
         best_global_indices = np.array(pool_data.indices)[best_local_indices]
+        print(best_global_indices.shape)
         return best_global_indices
