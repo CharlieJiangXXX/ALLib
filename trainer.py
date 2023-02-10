@@ -86,7 +86,9 @@ class ATTrainTest:
                 os.mkdir('checkpoint')
             if os.path.isfile(self.__get_ckpt_path()):
                 self._load_model()
-            print("[+] Model loaded.")
+                print("[+] Model loaded.")
+            else:
+                print("[!] No checkpoint available!")
 
         self._printProb = False
         self._graphCFM = False
