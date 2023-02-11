@@ -1,3 +1,6 @@
 /.idea/
 /Assets/
-/checkpoint_cifar
+/checkpoint/
+/checkpoint_med/
+/checkpoint_cifar/
+main.run.xml
