@@ -20,8 +20,8 @@ from transformed_dataset import TransformedDataset
 
 class ATTrainTest:
     def __init__(self, classes: list[str], model: str, criterion: str, optimizer: str, acquirer: str,
-                 norm: transforms.Normalize, train_data: Dataset, test_data: Dataset = None,
-                 batch_size: int = 512, acquisition_batch_size: int = 4, resume: bool = True) -> None:
+                 norm: transforms.Normalize, train_data: Dataset, val_data: Dataset = None, test_data: Dataset = None,
+                 batch_size: int = 128, acquisition_batch_size: int = 10, resume: bool = True) -> None:
 
         # Dataloader initialization
         self._batchSize = 128
@@ -44,7 +44,7 @@ class ATTrainTest:
         ])
 
         self._cudaAvailable = torch.cuda.is_available()
-        self.set_train_data(train_data)
+        self.set_train_data(train_data, val_data)
         if test_data:
             self.set_test_data(test_data)
 
@@ -57,7 +57,7 @@ class ATTrainTest:
             self._model = SimpleDLA(num_classes=self._numFeatures)
         elif model == "ResNet34":
             self._model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet34')
-            self._model.fc = nn.Linear(model.fc.in_features, self._numFeatures)  # For resnet
+            self._model.fc = nn.Linear(self._model.fc.in_features, self._numFeatures)  # For resnet
         self._device = torch.device('cuda' if self._cudaAvailable else 'cpu')
         self._model = self._model.to(self._device)
         if self._cudaAvailable:
@@ -122,13 +122,18 @@ class ATTrainTest:
         self._bestAcc = checkpoint['acc']
         self._minLoss = checkpoint['loss']
 
-    def set_train_data(self, train_data: Dataset) -> None:
-        total_size = len(train_data)
-        train_size = int(0.9 * total_size)
-        val_size = total_size - train_size
+    def set_train_data(self, train_data: Dataset, val_data: Dataset) -> None:
+        if not val_data:
+            total_size = len(train_data)
+            train_size = int(0.9 * total_size)
+            val_size = total_size - train_size
 
-        self._origTrainData = Subset(train_data, indices=torch.arange(total_size))
-        self._trainRaw, self._valRaw = random_split(self._origTrainData, [train_size, val_size])
+            self._origTrainData = Subset(train_data, indices=torch.arange(total_size))
+            self._trainRaw, self._valRaw = random_split(self._origTrainData, [train_size, val_size])
+        else:
+            self._origTrainData = ConcatDataset([train_data, val_data])
+            self._trainRaw = train_data
+            self._valRaw = val_data
 
         train_transformed = TransformedDataset(self._trainRaw, transformer=self._trainTransform)
         val_transformed = TransformedDataset(self._valRaw, transformer=self._testTransform)
@@ -329,7 +334,7 @@ class ATTrainTest:
 
         while len(pool) > 0:
             print(f'Acquiring BatchBALD batch. Pool size: {len(pool)}')
-            best_indices = self._acquirer.select_batch(pool)
+            best_indices = self._acquirer.select_batch(pool, self._numFeatures)
             move_data(best_indices, pool, train)
             self._trainLoader = DataLoader(train, batch_size=self._batchSize, shuffle=True,
                                            pin_memory=self._cudaAvailable, num_workers=4)
