@@ -2,6 +2,7 @@ import pandas as pd
 import seaborn as sn
 import torch.backends.cudnn as cudnn
 from sklearn.model_selection import KFold
+from sklearn.metrics import roc_auc_score
 from torch.optim.lr_scheduler import *
 from torch.optim.swa_utils import *
 from torchvision import transforms
@@ -95,6 +96,13 @@ class ATTrainTest:
         self._graphLoss = False
         self._confusionMatrix = torch.zeros(self._numFeatures, self._numFeatures)
 
+        self._trainAUROC = []
+        self._trainLoss = []
+        self._trainAcc = []
+        self._valAUROC = []
+        self._valLoss = []
+        self._valAcc = []
+
     def __del__(self) -> None:
         self.get_best_acc()
         self.get_min_loss()
@@ -112,8 +120,7 @@ class ATTrainTest:
             'acc': self._bestAcc,
             'loss': self._minLoss,
         }
-        if self._modelStr == "SimpleDLA":
-            torch.save(state, self.__get_ckpt_path())
+        torch.save(state, self.__get_ckpt_path())
 
     def _load_model(self) -> None:
         checkpoint = torch.load(self.__get_ckpt_path())
@@ -140,7 +147,7 @@ class ATTrainTest:
 
         self._trainLoader = DataLoader(train_transformed, batch_size=self._batchSize, shuffle=True,
                                        pin_memory=self._cudaAvailable, num_workers=4)
-        self._valLoader = DataLoader(val_transformed, batch_size=self._batchSize,
+        self._valLoader = DataLoader(val_transformed, batch_size=self._batchSize, shuffle=True,
                                      pin_memory=self._cudaAvailable, num_workers=4)
 
     def set_test_data(self, test_data: Dataset) -> None:
@@ -193,7 +200,7 @@ class ATTrainTest:
             plt.xlabel('FPR', fontsize=16)
             plt.legend(fontsize=12)
 
-    def _train_test_once(self, num_images: int = 0, mode: int = 0) -> (float, int):
+    def __train_val_once(self, num_images: int = 0, mode: int = 0) -> (float, float, int):
         # First set to eval mode
         if mode == 0:
             print("[-] Training...")
@@ -210,6 +217,8 @@ class ATTrainTest:
         loss_cnt = 0
         correct_count = 0
         total = 0
+        all_labels = []
+        all_preds = []
 
         with torch.set_grad_enabled(mode == 0):
             for index, (inputs, labels) in enumerate(loader):
@@ -240,6 +249,9 @@ class ATTrainTest:
                 loss_cnt = index + 1
 
                 # Visualization
+                all_labels.extend(labels.cpu().detach().numpy().tolist())
+                all_preds.extend(predicted.cpu().detach().numpy().tolist())
+
                 for i in range(inputs.size()[0]):
                     if num_images_left == 0:
                         break
@@ -258,51 +270,97 @@ class ATTrainTest:
                     for t, p in zip(labels.view(-1), predicted.view(-1)):
                         self._confusionMatrix[t.long(), p.long()] += 1
 
-        return loss_sum / loss_cnt, correct_count / total
+        roc_auc = roc_auc_score(all_labels, all_preds)
+
+        return roc_auc, loss_sum / loss_cnt, correct_count / total
+
+    def _train_val_once(self, epoch: int, num_epochs: int, num_images: int = 0):
+        print()
+        print('[*] Epoch {}/{}'.format(epoch, num_epochs))
+        swa = (epoch > (num_epochs // 2))
+        train_auroc, train_loss, train_acc = self.__train_val_once(num_images)
+        if swa:
+            if not self._swaModel:
+                self._swaModel = AveragedModel(self._model)
+            self._swaModel.update_parameters(self._model)
+        val_auroc, val_loss, val_acc = self.__train_val_once(num_images, 1)
+
+        self._swaScheduler.step() if swa else self._scheduler.step()
+
+        print('[*] Training results:')
+        print(
+            '[*] AUC ROC Score: {:.4f} Loss: {:.4f} Acc: {:.4f}'.format(train_auroc, train_loss, train_acc))
+        print('[*] Validation results:')
+        print(
+            '[*] AUC ROC Score: {:.4f} Loss: {:.4f} Acc: {:.4f}'.format(val_auroc, val_loss, val_acc))
+        if self._graphCFM:
+            self._plot_cfm()
+
+        # Make a copy of the model if the accuracy on the validation set has improved
+        if val_acc > self._bestAcc and val_loss < self._minLoss:
+            self._bestAcc = val_acc
+            self._minLoss = val_loss
+            self._save_model()  # Now we'll load in the best model weights
+            print("[+] Model updated.")
+        # else:
+        #    print("[!] Reverting model as there is no improvement in performance.")
+        #    self._load_model()
+
+        return [train_auroc, train_loss, train_acc * 100], [val_auroc, val_loss, val_acc * 100]
+
+    def _plot_stats(self, train_res, val_res, append: bool = True, plot: bool = True):
+        if append:
+            self._trainAUROC.append(train_res[0])
+            self._valAUROC.append(val_res[0])
+            self._trainLoss.append(train_res[1])
+            self._valLoss.append(val_res[1])
+            self._trainAcc.append(train_res[2])
+            self._valAcc.append(val_res[2])
+
+        if plot:
+            x_auroc = range(len(self._trainAUROC))
+            plt.plot(x_auroc, self._trainAUROC, 'g', label="Training")
+            plt.plot(x_auroc, self._valAUROC, 'r', label="Validation")
+            plt.title("AUC ROC Score Curve")
+            plt.show()
+
+            x_loss = range(len(self._trainLoss))
+            plt.plot(x_loss, self._trainLoss, 'g', label="Training")
+            plt.plot(x_loss, self._valLoss, 'r', label="Validation")
+            plt.title("Loss Curve")
+            plt.show()
+
+            x_acc = range(len(self._trainAcc))
+            plt.plot(x_acc, self._trainAcc, 'g', label="Training")
+            plt.plot(x_acc, self._valAcc, 'r', label="Validation")
+            plt.title("Accuracy Curve")
+            plt.show()
+
+    def _reset_stats(self):
+        self._trainAUROC = []
+        self._trainLoss = []
+        self._trainAcc = []
+        self._valAUROC = []
+        self._valLoss = []
+        self._valAcc = []
 
     def train(self, num_epochs: int = 10, num_images: int = 0) -> (list, list):
         start_time = time.time()
-        epoch_loss = []
-        epoch_acc = []
 
         for epoch in range(1, num_epochs + 1):
-            print()
-            print('[*] Epoch {}/{}'.format(epoch, num_epochs))
-            swa = (epoch > (num_epochs // 2))
-            self._train_test_once(num_images)
-            if swa:
-                if not self._swaModel:
-                    self._swaModel = AveragedModel(self._model)
-                self._swaModel.update_parameters(self._model)
-            loss, acc = self._train_test_once(num_images, 1)
+            train_res, val_res = self._train_val_once(epoch, num_epochs, num_images)
+            if self._graphLoss:
+                self._plot_stats(train_res, val_res, True, True)
 
-            self._swaScheduler.step() if swa else self._scheduler.step()
-
-            epoch_loss.append(loss)
-            epoch_acc.append(acc * 100)
-            print('[*] Loss: {:.4f} Acc: {:.4f}'.format(epoch_loss[-1], epoch_acc[-1]))
-            if self._graphCFM:
-                self._plot_cfm()
-
-            # Make a copy of the model if the accuracy on the validation set has improved
-            if epoch_acc[-1] > self._bestAcc:
-                self._bestAcc = epoch_acc[-1]
-                self._minLoss = epoch_loss[-1]
-                self._save_model()  # Now we'll load in the best model weights
-                print("[+] Model updated.")
-
-        update_bn(self._trainLoader, self._swaModel)
-        if self._graphLoss:
-            plt.plot(epoch_loss)
-            plt.plot(epoch_acc)
-            plt.show()
+        self._reset_stats()
+        if self._swaModel:
+            update_bn(self._trainLoader, self._swaModel)
 
         run_time = time.time() - start_time
         print('[+] Training completed in {:.0f}m {:.0f}s'.format(run_time // 60, run_time % 60))
-        return epoch_loss, epoch_acc
 
     def test(self, num_images: int = 0) -> None:
-        self._train_test_once(num_images, 2)
+        self.__train_val_once(num_images, 2)
 
     def train_crossval(self, k_folds: int = 5, num_images: int = 0):
         kfold = KFold(n_splits=k_folds, shuffle=True)
@@ -317,7 +375,7 @@ class ATTrainTest:
             test_subsampler = SubsetRandomSampler(test_ids)
 
             self._trainLoader = torch.utils.data.DataLoader(dataset, batch_size=self._batchSize,
-                                                            sampler=train_subsampler)
+                                                            sampler=train_subsampler, shuffle=True)
             self._valLoader = torch.utils.data.DataLoader(dataset, batch_size=self._batchSize, sampler=test_subsampler)
 
             self.train(1, num_images)
@@ -332,14 +390,24 @@ class ATTrainTest:
         train = TransformedDataset(train, transformer=self._trainTransform)
         pool = TransformedDataset(pool, transformer=self._trainTransform)
 
+        orig_len = len(pool)
         while len(pool) > 0:
             print(f'Acquiring BatchBALD batch. Pool size: {len(pool)}')
             best_indices = self._acquirer.select_batch(pool, self._numFeatures)
             move_data(best_indices, pool, train)
             self._trainLoader = DataLoader(train, batch_size=self._batchSize, shuffle=True,
                                            pin_memory=self._cudaAvailable, num_workers=4)
-            self.train(1, num_images)
+            train_res, val_res = self._train_val_once(orig_len - len(pool), orig_len, num_images)
+            if self._graphLoss:
+                self._plot_stats(train_res, val_res, True, True)
+
+        self._reset_stats()
+        if self._swaModel:
+            update_bn(self._trainLoader, self._swaModel)
 
         self.test(num_images)
 
+
 # https://odsc.medium.com/crash-course-pool-based-sampling-in-active-learning-cb40e30d49df
+
+# to-do: maybe plot loss/acc change in epoch?
