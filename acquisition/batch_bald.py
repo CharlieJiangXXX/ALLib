@@ -24,8 +24,8 @@ class ATBatchDisagreement(ATDisagreement):
             pool_loader = DataLoader(sub_pool_data, batch_size=self._subBatchSize, pin_memory=True,
                                      shuffle=False)
             pool_p_y = torch.zeros(len(sub_pool_data), num_features, k)
-            for index, (sample, _) in enumerate(pool_loader):
-                sample = sample.to(self._device)
+            for index, sample in enumerate(pool_loader):
+                sample = sample[0].to(self._device)
                 pool_p_y[index:index + sample.shape[0]] = torch.stack([self._model(sample) for _ in range(k)],
                                                                       dim=1).permute(0, 2, 1)
 

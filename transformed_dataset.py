@@ -21,15 +21,20 @@ class TransformedDataset(data.Dataset):
             self.transformer = lambda _, data_label: (vision_transformer(data_label[0]), data_label[1])
 
     def __getitem__(self, idx):
+        def transform_single(value):
+            value = list(value)
+            if type(value[0]) is not torch.Tensor:
+                value[0] = self.transformer(value[0])
+            return tuple(value)
+
         if isinstance(idx, list):
             values = []
             for i in idx:
                 value = self.dataset[self.indices[i]]
-                values.append((self.transformer(value[0]), value[1]))
+                values.append(transform_single(value))
             return values
 
-        x = self.transformer(self.dataset[self.indices[idx]][0])
-        return x, self.dataset[self.indices[idx]][1]
+        return transform_single(self.dataset[self.indices[idx]])
 
     def __len__(self):
         return len(self.indices)
