@@ -1,7 +1,6 @@
 import torchvision.datasets
 from trainer import *
 from med_data import MedImageFolders
-from sklearn.model_selection import train_test_split
 import random
 
 if __name__ == '__main__':
@@ -16,8 +15,10 @@ if __name__ == '__main__':
     if option == 1:
         cifar_train = torchvision.datasets.CIFAR10(root='../data', train=True, download=True)
         cifar_test = torchvision.datasets.CIFAR10(root='../data', train=False, download=True)
-        trainer = ATTrainTest(cifar_train.classes, "SimpleDLA", "CrossEntropyLoss", "SGD", "BatchBALD", norm,
+        trainer = ATTrainTest("cifar10", cifar_train.classes, "SimpleDLA", "CrossEntropyLoss", "SGD", "BatchBALD", norm,
                               cifar_train, None, cifar_test, resume=True)
+        trainer.train_cross_validate()
+        #trainer.test()
 
     # Medical
     elif option == 2:
@@ -75,13 +76,11 @@ if __name__ == '__main__':
         med_val = MedImageFolders(folders_val)
         med_test = MedImageFolders(folders_test)
 
-        trainer = ATTrainTest(med_train.classes, "ResNet34", "CrossEntropyLoss", "SGD", "BatchBALD", norm, med_train,
-                              med_val, med_test, 16)
-        trainer.train_cross_validate(folders=folders_train + folders_val)
+        trainer = ATTrainTest("medical", med_train.classes, "ResNet34", "CrossEntropyLoss", "SGD", "BatchBALD", norm,
+                              med_train, med_val, med_test, 16)
+        trainer.train_cross_validate(folders=folders_train + folders_val + folders_test)
+        # trainer.train_active(0)
+        # trainer.test()
 
     else:
         raise AssertionError("[!] Option must be 1 or 2!")
-
-    # trainer.train(2)
-    #trainer.train_active(0)
-    #trainer.test()

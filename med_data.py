@@ -1,6 +1,7 @@
 from torch.utils.data import Dataset
 from torchvision.datasets.folder import default_loader
 import os
+from functools import cmp_to_key
 
 
 class MedImageFolders(Dataset):
@@ -20,34 +21,45 @@ class MedImageFolders(Dataset):
             pix_ratio = int(name[-6:-4])
             return h, s, v, pix_ratio
 
-        def better(tile1: str, tile2: str) -> bool:
+        def better(tile1: str, tile2: str) -> int:
             tile1_stats = get_stats_from_name(tile1)
             tile2_stats = get_stats_from_name(tile2)
             if tile1_stats[1] > tile2_stats[1]:
-                return True
-            return False
+                return 1
+            if tile1_stats[1] == tile2_stats[1]:
+                return 0
+            return -1
 
         for folder in self.folders:
-            top_tiles = []
-
             files = os.listdir(folder)
-            class_idx = int("Rat_HCC_HE" in folder)
 
             # SLIDENAME_slice_${i}_${j}_${h}_${s}_${v}_${pix_ratio}.jpg
             # h, s, v: 4 digits; pix_ratio: 2 digits
+            files = sorted(files, key=cmp_to_key(better), reverse=True)
+            class_idx = int("Rat_HCC_HE" in folder)
 
-            for name in files:
-                full_name = os.path.join(folder, name)
-                if not top_tiles:
-                    top_tiles.append((full_name, class_idx))
-                    continue
+            top_tiles = [(os.path.join(folder, elem), class_idx) for elem in files[:tile_num]]
 
-                if better(full_name, top_tiles[-1][0]):
-                    top_tiles[-1:-1] = [(full_name, class_idx)]  # Append before last
-                else:
-                    top_tiles.append((full_name, class_idx))
-                if len(top_tiles) > tile_num:
-                    top_tiles.pop()
+            import matplotlib.pyplot as plt
+            from mpl_toolkits.axes_grid1 import ImageGrid
+            from matplotlib.image import imread
+
+            def temp_plot(folder, top_tiles):
+                images = []
+                for img in top_tiles:
+                    image = imread(img[0])
+                    images.append(image)
+
+                fig = plt.figure(figsize=(10., 10.))
+                grid = ImageGrid(fig, 111, nrows_ncols=(7, 7), axes_pad=0.1)
+
+                for ax, im in zip(grid, images):
+                    ax.imshow(im)
+
+                fig.suptitle(folder)
+                plt.show()
+
+            #temp_plot(folder, top_tiles)
 
             self.samples.extend(top_tiles)
 
@@ -72,3 +84,6 @@ class MedImageFolders(Dataset):
 
     def __len__(self):
         return len(self.samples)
+
+
+
